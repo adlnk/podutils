@@ -75,39 +75,56 @@ cmd_set_pod() {
 
 cmd_add() {
     if [[ -z "$1" ]]; then
-        echo "Usage: $0 add <file-path>"
+        echo "Usage: $0 add <file-path> [file-path ...]"
         exit 1
     fi
     
     load_config
     
-    # Check if file exists
-    if [[ ! -f "$1" ]]; then
-        echo "Warning: File '$1' does not exist locally"
-        read -p "Add anyway? (y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 0
+    local files_added=()
+    local files_skipped=()
+    
+    # Process each file argument
+    for file in "$@"; do
+        # Check if file exists
+        if [[ ! -f "$file" ]]; then
+            echo "Warning: File '$file' does not exist locally"
+            read -p "Add anyway? (y/N): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                files_skipped+=("$file")
+                continue
+            fi
         fi
+        
+        # Add to sync files if not already present
+        if [[ -z "$SYNC_FILES" ]]; then
+            SYNC_FILES="$file"
+            files_added+=("$file")
+        elif [[ ":$SYNC_FILES:" != *":$file:"* ]]; then
+            SYNC_FILES="$SYNC_FILES:$file"
+            files_added+=("$file")
+        else
+            echo "File '$file' already in sync list"
+            files_skipped+=("$file")
+        fi
+    done
+    
+    # Save config if any files were added
+    if [[ ${#files_added[@]} -gt 0 ]]; then
+        save_config
+        echo "Added: ${files_added[*]}"
     fi
     
-    # Add to sync files if not already present
-    if [[ -z "$SYNC_FILES" ]]; then
-        SYNC_FILES="$1"
-    elif [[ ":$SYNC_FILES:" != *":$1:"* ]]; then
-        SYNC_FILES="$SYNC_FILES:$1"
-    else
-        echo "File '$1' already in sync list"
-        exit 0
+    # Report skipped files
+    if [[ ${#files_skipped[@]} -gt 0 ]]; then
+        echo "Skipped: ${files_skipped[*]}"
     fi
-    
-    save_config
-    echo "Added: $1"
 }
 
 cmd_remove() {
     if [[ -z "$1" ]]; then
-        echo "Usage: $0 remove <file-path>"
+        echo "Usage: $0 remove <file-path> [file-path ...]"
         exit 1
     fi
     
@@ -118,11 +135,28 @@ cmd_remove() {
         exit 0
     fi
     
-    # Remove file from colon-separated list
+    local files_removed=()
+    local files_not_found=()
+    
+    # Create a list of files to remove
+    local files_to_remove=("$@")
+    
+    # Start with current sync files
     NEW_FILES=""
     IFS=':' read -ra file_array <<< "$SYNC_FILES"
+    
+    # Build new file list excluding files to remove
     for file in "${file_array[@]}"; do
-        if [[ "$file" != "$1" ]]; then
+        local should_remove=false
+        for remove_file in "${files_to_remove[@]}"; do
+            if [[ "$file" == "$remove_file" ]]; then
+                should_remove=true
+                files_removed+=("$remove_file")
+                break
+            fi
+        done
+        
+        if [[ "$should_remove" == false ]]; then
             if [[ -z "$NEW_FILES" ]]; then
                 NEW_FILES="$file"
             else
@@ -131,14 +165,36 @@ cmd_remove() {
         fi
     done
     
-    if [[ "$NEW_FILES" == "$SYNC_FILES" ]]; then
-        echo "File '$1' not found in sync list"
-        exit 1
+    # Check for files that weren't found
+    for remove_file in "${files_to_remove[@]}"; do
+        local found=false
+        for removed_file in "${files_removed[@]}"; do
+            if [[ "$remove_file" == "$removed_file" ]]; then
+                found=true
+                break
+            fi
+        done
+        if [[ "$found" == false ]]; then
+            files_not_found+=("$remove_file")
+        fi
+    done
+    
+    # Update sync files and save config if any files were removed
+    if [[ ${#files_removed[@]} -gt 0 ]]; then
+        SYNC_FILES="$NEW_FILES"
+        save_config
+        echo "Removed: ${files_removed[*]}"
     fi
     
-    SYNC_FILES="$NEW_FILES"
-    save_config
-    echo "Removed: $1"
+    # Report files not found
+    if [[ ${#files_not_found[@]} -gt 0 ]]; then
+        echo "Not found in sync list: ${files_not_found[*]}"
+    fi
+    
+    # Exit with error only if no files were removed
+    if [[ ${#files_removed[@]} -eq 0 ]]; then
+        exit 1
+    fi
 }
 
 cmd_set_remote_path() {
