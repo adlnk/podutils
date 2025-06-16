@@ -3,8 +3,8 @@
 #######################################
 # PodSync Installer
 #
-# Simple installer that copies podsync to ~/bin/ and makes it executable.
-# Creates ~/bin/ directory if it doesn't exist.
+# Simple installer that copies podsync to /usr/local/bin/ and makes it executable.
+# Requires sudo privileges for system-wide installation.
 #######################################
 
 set -e
@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_FILE="$SCRIPT_DIR/podsync"
-INSTALL_DIR="$HOME/bin"
+INSTALL_DIR="/usr/local/bin"
 TARGET_FILE="$INSTALL_DIR/podsync"
 
 echo "PodSync Installer"
@@ -27,6 +27,13 @@ echo "=================="
 if [[ ! -f "$SOURCE_FILE" ]]; then
     echo -e "${RED}Error: podsync script not found at $SOURCE_FILE${NC}"
     echo "Make sure you're running this installer from the correct directory."
+    exit 1
+fi
+
+# Check if running as root/sudo
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}Error: This script must be run with sudo${NC}"
+    echo "Usage: sudo ./install.sh"
     exit 1
 fi
 
@@ -52,19 +59,19 @@ echo "  podsync sync                 # Sync files"
 echo "  podsync help                 # Show all commands"
 echo ""
 
-# Check if ~/bin is in PATH
-if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
-    echo -e "${YELLOW}Note: $HOME/bin is not in your PATH${NC}"
+# Check if /usr/local/bin is in PATH
+if [[ ":$PATH:" != *":/usr/local/bin:"* ]]; then
+    echo -e "${YELLOW}Note: /usr/local/bin is not in your PATH${NC}"
     echo "Add this line to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
     echo ""
-    echo "  export PATH=\"\$HOME/bin:\$PATH\""
+    echo "  export PATH=\"/usr/local/bin:\$PATH\""
     echo ""
     echo "Then restart your terminal or run: source ~/.bashrc"
     echo ""
     echo "Alternatively, you can run podsync using the full path:"
     echo "  $TARGET_FILE help"
 else
-    echo -e "${GREEN}✓ $HOME/bin is already in your PATH${NC}"
+    echo -e "${GREEN}✓ /usr/local/bin is already in your PATH${NC}"
     echo "You can now use 'podsync' from anywhere!"
 fi
 
