@@ -73,6 +73,19 @@ cmd_set_pod() {
     echo "Pod ID set to: $SYNC_POD_ID"
 }
 
+cmd_forget_pod() {
+    load_config
+    if [[ -z "$SYNC_POD_ID" ]]; then
+        echo "No pod ID is currently set"
+        exit 0
+    fi
+    
+    echo "Clearing pod ID: $SYNC_POD_ID"
+    SYNC_POD_ID=""
+    save_config
+    echo "Pod ID cleared"
+}
+
 cmd_add() {
     if [[ -z "$1" ]]; then
         echo "Usage: $0 add <file-path> [file-path ...]"
@@ -304,6 +317,7 @@ Commands:
   sync                      Sync files to pod (default)
   status                    Show current pod ID and sync files
   set-pod <id>              Set the target pod ID
+  forget-pod                Clear the current pod ID
   set-remote-path <path>    Set the remote base path (default: /workspace)
   add <file> [file ...]     Add files to the sync list
   remove <file> [file ...]  Remove files from the sync list
@@ -317,6 +331,7 @@ Sync Options:
 
 Examples:
   $0 set-pod k4kb5h7yt7n15n
+  $0 forget-pod
   $0 set-remote-path /workspace/my-project
   $0 add bin/run_experiments.sh config.json
   $0 status
@@ -491,6 +506,9 @@ case "$COMMAND" in
         ;;
     set-pod)
         cmd_set_pod "$@"
+        ;;
+    forget-pod)
+        cmd_forget_pod
         ;;
     set-remote-path)
         cmd_set_remote_path "$@"
