@@ -209,6 +209,87 @@ cmd_set_remote_path() {
     echo "Remote path set to: $SYNC_REMOTE_PATH"
 }
 
+cmd_get_ssh() {
+    load_config
+
+    # Validate environment
+    POD_ID="${SYNC_POD_ID:-$RUNPOD_POD_ID}"
+    if [[ -z "$POD_ID" ]]; then
+        echo "Error: No pod ID specified"
+        echo "Use: $0 set-pod <pod-id>"
+        exit 1
+    fi
+    
+    SSH_KEY="${SYNC_SSH_KEY:-$DEFAULT_SSH_KEY}"
+    SSH_KEY=$(eval echo "$SSH_KEY")  # Expand ~ if present
+
+    # Get SSH connection details
+    POD_DETAILS=$(runpodctl get pod "$POD_ID" --allfields 2>/dev/null) || {
+        echo "Error: Failed to get pod details" >&2
+        echo "Make sure pod ID '$POD_ID' exists and runpodctl is configured" >&2
+        exit 1
+    }
+    
+    # Extract SSH host and port
+    SSH_CONNECTION=$(echo "$POD_DETAILS" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
+    if [[ -z "$SSH_CONNECTION" ]]; then
+        echo "Error: Could not extract SSH connection details" >&2
+        echo "Pod might not be running or SSH might not be available" >&2
+        exit 1
+    fi
+    
+    SSH_HOST=$(echo "$SSH_CONNECTION" | cut -d':' -f1)
+    SSH_PORT=$(echo "$SSH_CONNECTION" | cut -d':' -f2 | cut -d'-' -f1)
+    
+    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+    
+    echo "ssh $SSH_OPTS -p $SSH_PORT -i $SSH_KEY root@$SSH_HOST"
+}
+
+cmd_ssh() {
+    load_config
+
+    # Validate environment
+    POD_ID="${SYNC_POD_ID:-$RUNPOD_POD_ID}"
+    if [[ -z "$POD_ID" ]]; then
+        echo "Error: No pod ID specified"
+        echo "Use: $0 set-pod <pod-id>"
+        exit 1
+    fi
+    
+    SSH_KEY="${SYNC_SSH_KEY:-$DEFAULT_SSH_KEY}"
+    SSH_KEY=$(eval echo "$SSH_KEY")  # Expand ~ if present
+
+    # Get SSH connection details
+    POD_DETAILS=$(runpodctl get pod "$POD_ID" --allfields 2>/dev/null) || {
+        echo "Error: Failed to get pod details"
+        echo "Make sure pod ID '$POD_ID' exists and runpodctl is configured"
+        exit 1
+    }
+    
+    # Extract SSH host and port
+    SSH_CONNECTION=$(echo "$POD_DETAILS" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
+    if [[ -z "$SSH_CONNECTION" ]]; then
+        echo "Error: Could not extract SSH connection details"
+        echo "Pod might not be running or SSH might not be available"
+        exit 1
+    fi
+    
+    SSH_HOST=$(echo "$SSH_CONNECTION" | cut -d':' -f1)
+    SSH_PORT=$(echo "$SSH_CONNECTION" | cut -d':' -f2 | cut -d'-' -f1)
+    
+    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+    
+    # Execute SSH connection or command
+    if [[ $# -eq 0 ]]; then
+        # Interactive SSH session
+        exec ssh $SSH_OPTS -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST"
+    else
+        # Execute remote command
+        ssh $SSH_OPTS -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST" "$@"
+    fi
+}
+
 #######################################
 # Print help
 #######################################
@@ -224,8 +305,10 @@ Commands:
   status                    Show current pod ID and sync files
   set-pod <id>              Set the target pod ID
   set-remote-path <path>    Set the remote base path (default: /workspace)
-  add <file>                Add a file to the sync list
-  remove <file>             Remove a file from the sync list
+  add <file> [file ...]     Add files to the sync list
+  remove <file> [file ...]  Remove files from the sync list
+  get-ssh                   Print SSH command for current pod
+  ssh [command]             Connect to pod via SSH or execute remote command
   help                      Show this help
 
 Sync Options:
@@ -235,13 +318,16 @@ Sync Options:
 Examples:
   $0 set-pod k4kb5h7yt7n15n
   $0 set-remote-path /workspace/my-project
-  $0 add bin/run_experiments.sh
-  $0 add config.json
+  $0 add bin/run_experiments.sh config.json
   $0 status
   $0 sync
   $0 sync --dry-run
   $0 sync --remote-path /tmp/test
   $0 remove old_file.txt
+  $0 get-ssh
+  $0 ssh
+  $0 ssh "ls -la"
+  $0 ssh "cd /workspace && python train.py"
 
 EOF
 }
@@ -414,6 +500,12 @@ case "$COMMAND" in
         ;;
     remove)
         cmd_remove "$@"
+        ;;
+    get-ssh)
+        cmd_get_ssh
+        ;;
+    ssh)
+        cmd_ssh "$@"
         ;;
     *)
         echo "Unknown command: $COMMAND"
