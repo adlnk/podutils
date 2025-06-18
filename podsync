@@ -82,7 +82,47 @@ EOF
 #######################################
 cmd_status() {
     load_config
-    echo "Pod ID: ${SYNC_POD_ID:-<not set>}"
+    
+    # Check pod status if we have a pod ID
+    POD_STATUS=""
+    CONNECTION_STATUS=""
+    if [[ -n "${SYNC_POD_ID}" ]]; then
+        POD_DETAILS=$(runpodctl get pod "${SYNC_POD_ID}" --allfields 2>/dev/null) || true
+        if [[ -n "$POD_DETAILS" ]]; then
+            # Check if we have actual data (more than just headers)
+            DATA_ROWS=$(echo "$POD_DETAILS" | tail -n +2)
+            if [[ -n "$DATA_ROWS" ]]; then
+                # Extract status from the output (7th column)
+                POD_STATUS=$(echo "$DATA_ROWS" | awk '{print $7}')
+                
+                # Check if SSH connection is available
+                SSH_CONNECTION=$(echo "$POD_DETAILS" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
+                if [[ -n "$SSH_CONNECTION" ]]; then
+                    CONNECTION_STATUS="✓ SSH available"
+                else
+                    CONNECTION_STATUS="✗ SSH not available"
+                fi
+            else
+                POD_STATUS="NOT FOUND"
+                CONNECTION_STATUS="✗ Pod not found"
+            fi
+        else
+            POD_STATUS="NOT FOUND"
+            CONNECTION_STATUS="✗ Pod not found"
+        fi
+    fi
+    
+    # Display pod information
+    if [[ -z "${SYNC_POD_ID}" ]]; then
+        echo "Pod ID: <not set>"
+    else
+        echo "Pod ID: ${SYNC_POD_ID}"
+        if [[ -n "$POD_STATUS" ]]; then
+            echo "Pod Status: $POD_STATUS"
+            echo "Connection: $CONNECTION_STATUS"
+        fi
+    fi
+    
     echo "SSH Key: ${SYNC_SSH_KEY:-$DEFAULT_SSH_KEY}"
     echo "Remote Path: ${SYNC_REMOTE_PATH:-$DEFAULT_REMOTE_PATH}"
     
@@ -118,14 +158,14 @@ cmd_status() {
             if [[ ! -f "$file" ]]; then
                 echo "  ✗ $file"
             elif [[ "$CAN_CHECK_REMOTE" == false ]]; then
-                echo "  ⚠︎ $file (no pod connection)"
+                echo "  ? $file (no pod connection)"
             else
                 # Check if file is in sync with remote
                 remote_path="${SYNC_REMOTE_PATH:-$DEFAULT_REMOTE_PATH}/$file"
                 if files_differ "$file" "$remote_path" "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST"; then
                     echo "  ➤ $file"
                 else
-                    echo "  ✓ $file"
+                    echo "  = $file"
                 fi
             fi
         done
