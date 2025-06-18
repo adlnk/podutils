@@ -159,6 +159,32 @@ cmd_forget_pod() {
     echo "Pod ID cleared"
 }
 
+cmd_list_files() {
+    load_config
+    if [[ -z "$SYNC_FILES" ]]; then
+        echo "No files in sync list"
+        exit 0
+    fi
+    
+    IFS=':' read -ra file_array <<< "$SYNC_FILES"
+    for file in "${file_array[@]}"; do
+        echo "$file"
+    done
+}
+
+cmd_remove_all() {
+    load_config
+    if [[ -z "$SYNC_FILES" ]]; then
+        echo "File list is already empty"
+        exit 0
+    fi
+    
+    echo "Clearing file list"
+    SYNC_FILES=""
+    save_config
+    echo "File list cleared"
+}
+
 cmd_add() {
     if [[ -z "$1" ]]; then
         echo "Usage: $0 add <file-path> [file-path ...]"
@@ -394,6 +420,8 @@ Commands:
   set-remote-path <path>    Set the remote base path (default: /workspace)
   add <file> [file ...]     Add files to the sync list
   remove <file> [file ...]  Remove files from the sync list
+  list-files                List files in the sync list
+  remove-all                Clear all files from the sync list
   get-ssh                   Print SSH command for current pod
   ssh [command]             Connect to pod via SSH or execute remote command
   help                      Show this help
@@ -407,6 +435,8 @@ Examples:
   $0 forget-pod
   $0 set-remote-path /workspace/my-project
   $0 add bin/run_experiments.sh config.json
+  $0 list-files
+  $0 remove-all
   $0 status
   $0 sync
   $0 sync --dry-run
@@ -608,6 +638,12 @@ case "$COMMAND" in
         ;;
     remove)
         cmd_remove "$@"
+        ;;
+    list-files)
+        cmd_list_files
+        ;;
+    remove-all)
+        cmd_remove_all
         ;;
     get-ssh)
         cmd_get_ssh
