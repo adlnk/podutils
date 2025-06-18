@@ -19,6 +19,46 @@ DEFAULT_REMOTE_PATH="/workspace"
 CONFIG_FILE=".podsync"
 
 #######################################
+# File comparison helpers
+#######################################
+get_local_hash() {
+    local file="$1"
+    if [[ -f "$file" ]]; then
+        md5sum "$file" 2>/dev/null | cut -d' ' -f1 || md5 -q "$file" 2>/dev/null
+    fi
+}
+
+get_remote_hash() {
+    local remote_path="$1"
+    local ssh_opts="$2"
+    local ssh_port="$3"
+    local ssh_key="$4"
+    local ssh_host="$5"
+    
+    ssh $ssh_opts -p "$ssh_port" -i "$ssh_key" "$ssh_host" \
+        "if [[ -f '$remote_path' ]]; then md5sum '$remote_path' 2>/dev/null | cut -d' ' -f1 || md5 -q '$remote_path' 2>/dev/null; fi" 2>/dev/null
+}
+
+files_differ() {
+    local local_file="$1"
+    local remote_path="$2"
+    local ssh_opts="$3"
+    local ssh_port="$4"
+    local ssh_key="$5"
+    local ssh_host="$6"
+    
+    local local_hash=$(get_local_hash "$local_file")
+    local remote_hash=$(get_remote_hash "$remote_path" "$ssh_opts" "$ssh_port" "$ssh_key" "$ssh_host")
+    
+    # If we can't get either hash, assume they differ (sync to be safe)
+    if [[ -z "$local_hash" || -z "$remote_hash" ]]; then
+        return 0  # files differ
+    fi
+    
+    [[ "$local_hash" != "$remote_hash" ]]
+}
+
+#######################################
 # Config file helpers
 #######################################
 load_config() {
@@ -48,12 +88,45 @@ cmd_status() {
     
     if [[ -n "$SYNC_FILES" ]]; then
         echo "Files:"
+        
+        # Check if we can get SSH connection details for sync status
+        POD_ID="${SYNC_POD_ID:-$RUNPOD_POD_ID}"
+        CAN_CHECK_REMOTE=false
+        SSH_OPTS=""
+        SSH_PORT=""
+        SSH_KEY=""
+        SSH_HOST=""
+        
+        if [[ -n "$POD_ID" ]]; then
+            SSH_KEY="${SYNC_SSH_KEY:-$DEFAULT_SSH_KEY}"
+            SSH_KEY=$(eval echo "$SSH_KEY")
+            
+            POD_DETAILS=$(runpodctl get pod "$POD_ID" --allfields 2>/dev/null) || true
+            if [[ -n "$POD_DETAILS" ]]; then
+                SSH_CONNECTION=$(echo "$POD_DETAILS" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
+                if [[ -n "$SSH_CONNECTION" ]]; then
+                    SSH_HOST=$(echo "$SSH_CONNECTION" | cut -d':' -f1)
+                    SSH_PORT=$(echo "$SSH_CONNECTION" | cut -d':' -f2 | cut -d'-' -f1)
+                    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+                    CAN_CHECK_REMOTE=true
+                fi
+            fi
+        fi
+        
         IFS=':' read -ra file_array <<< "$SYNC_FILES"
         for file in "${file_array[@]}"; do
-            if [[ -f "$file" ]]; then
-                echo "  ✓ $file"
+            if [[ ! -f "$file" ]]; then
+                echo "  ✗ $file"
+            elif [[ "$CAN_CHECK_REMOTE" == false ]]; then
+                echo "  ⚠︎ $file (no pod connection)"
             else
-                echo "  ✗ $file (not found)"
+                # Check if file is in sync with remote
+                remote_path="${SYNC_REMOTE_PATH:-$DEFAULT_REMOTE_PATH}/$file"
+                if files_differ "$file" "$remote_path" "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST"; then
+                    echo "  ➤ $file"
+                else
+                    echo "  ✓ $file"
+                fi
             fi
         done
     else
@@ -442,30 +515,47 @@ cmd_sync() {
     
     SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
     
+    SYNCED_COUNT=0
+    SKIPPED_COUNT=0
+    
     for file in "${VALID_FILES[@]}"; do
         remote_path="$REMOTE_BASE_PATH/$file"
         
         if [[ "$DRY_RUN" == true ]]; then
-            echo "  [DRY RUN] $file → $remote_path"
+            # Check if files differ for dry run
+            if files_differ "$file" "$remote_path" "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST"; then
+                echo "  [DRY RUN] $file → $remote_path (would sync)"
+            else
+                echo "  [DRY RUN] $file → $remote_path (unchanged, would skip)"
+            fi
         else
-            echo "  Syncing: $file → $remote_path"
+            echo "  Checking: $file"
             
-            # Create remote directory if needed
-            remote_dir=$(dirname "$remote_path")
-            ssh $SSH_OPTS -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST" \
-                "mkdir -p '$remote_dir'" || {
-                echo "    Failed to create remote directory: $remote_dir"
-                continue
-            }
-            
-            # Copy the file
-            scp $SSH_OPTS -P "$SSH_PORT" -i "$SSH_KEY" \
-                "$file" "root@$SSH_HOST:$remote_path" || {
-                echo "    Failed to sync: $file"
-                continue
-            }
-            
-            echo "    ✓ Success"
+            # Check if files differ
+            if files_differ "$file" "$remote_path" "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST"; then
+                echo "    Files differ, syncing..."
+                
+                # Create remote directory if needed
+                remote_dir=$(dirname "$remote_path")
+                ssh $SSH_OPTS -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST" \
+                    "mkdir -p '$remote_dir'" || {
+                    echo "    Failed to create remote directory: $remote_dir"
+                    continue
+                }
+                
+                # Copy the file
+                scp $SSH_OPTS -P "$SSH_PORT" -i "$SSH_KEY" \
+                    "$file" "root@$SSH_HOST:$remote_path" || {
+                    echo "    Failed to sync: $file"
+                    continue
+                }
+                
+                echo "    ✓ Synced"
+                ((SYNCED_COUNT++))
+            else
+                echo "    ✓ Unchanged, skipping"
+                ((SKIPPED_COUNT++))
+            fi
         fi
     done
     
@@ -474,7 +564,7 @@ cmd_sync() {
         echo "Dry run complete. Use without --dry-run to actually sync files."
     else
         echo ""
-        echo "Sync complete!"
+        echo "Sync complete! ($SYNCED_COUNT synced, $SKIPPED_COUNT unchanged)"
     fi
 }
 
