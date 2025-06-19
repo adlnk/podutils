@@ -39,6 +39,31 @@ get_remote_hash() {
         "if [[ -f '$remote_path' ]]; then md5sum '$remote_path' 2>/dev/null | cut -d' ' -f1 || md5 -q '$remote_path' 2>/dev/null; fi" 2>/dev/null
 }
 
+get_all_remote_hashes() {
+    local ssh_opts="$1"
+    local ssh_port="$2"
+    local ssh_key="$3"
+    local ssh_host="$4"
+    local remote_base_path="$5"
+    shift 5
+    local files=("$@")
+    
+    if [[ ${#files[@]} -eq 0 ]]; then
+        return 0
+    fi
+    
+    # Build a single command to hash all files
+    local hash_commands=()
+    for file in "${files[@]}"; do
+        local remote_path="$remote_base_path/$file"
+        hash_commands+=("if [[ -f '$remote_path' ]]; then echo \"$file:\$(md5sum '$remote_path' 2>/dev/null | cut -d' ' -f1 || md5 -q '$remote_path' 2>/dev/null)\"; fi")
+    done
+    
+    # Join commands with semicolons and execute in single SSH call
+    local combined_command=$(IFS='; '; echo "${hash_commands[*]}")
+    ssh $ssh_opts -p "$ssh_port" -i "$ssh_key" "$ssh_host" "$combined_command" 2>/dev/null
+}
+
 files_differ() {
     local local_file="$1"
     local remote_path="$2"
@@ -56,6 +81,45 @@ files_differ() {
     fi
     
     [[ "$local_hash" != "$remote_hash" ]]
+}
+
+batch_files_differ() {
+    local ssh_opts="$1"
+    local ssh_port="$2"
+    local ssh_key="$3"
+    local ssh_host="$4"
+    local remote_base_path="$5"
+    shift 5
+    local files=("$@")
+    
+    if [[ ${#files[@]} -eq 0 ]]; then
+        return 0
+    fi
+    
+    # Get all remote hashes in a single call
+    local remote_output=$(get_all_remote_hashes "$ssh_opts" "$ssh_port" "$ssh_key" "$ssh_host" "$remote_base_path" "${files[@]}")
+    
+    # Compare each file by parsing remote output
+    for file in "${files[@]}"; do
+        local local_hash=$(get_local_hash "$file")
+        local remote_hash=""
+        
+        # Extract remote hash for this file from output
+        if [[ -n "$remote_output" ]]; then
+            remote_hash=$(echo "$remote_output" | grep "^$file:" | cut -d':' -f2)
+        fi
+        
+        # Determine status
+        if [[ ! -f "$file" ]]; then
+            echo "$file:missing"
+        elif [[ -z "$local_hash" || -z "$remote_hash" ]]; then
+            echo "$file:differ"
+        elif [[ "$local_hash" != "$remote_hash" ]]; then
+            echo "$file:differ"
+        else
+            echo "$file:same"
+        fi
+    done
 }
 
 #######################################
@@ -154,21 +218,34 @@ cmd_status() {
         fi
         
         IFS=':' read -ra file_array <<< "$SYNC_FILES"
-        for file in "${file_array[@]}"; do
-            if [[ ! -f "$file" ]]; then
-                echo "  ✗ $file"
-            elif [[ "$CAN_CHECK_REMOTE" == false ]]; then
-                echo "  ? $file (no pod connection)"
-            else
-                # Check if file is in sync with remote
-                remote_path="${SYNC_REMOTE_PATH:-$DEFAULT_REMOTE_PATH}/$file"
-                if files_differ "$file" "$remote_path" "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST"; then
-                    echo "  ➤ $file"
+        
+        if [[ "$CAN_CHECK_REMOTE" == false ]]; then
+            # Can't check remote, show basic status
+            for file in "${file_array[@]}"; do
+                if [[ ! -f "$file" ]]; then
+                    echo "  ∄ $file"
                 else
-                    echo "  = $file"
+                    echo "  ? $file"
                 fi
-            fi
-        done
+            done
+        else
+            # Use batch comparison for efficiency
+            batch_output=$(batch_files_differ "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "${SYNC_REMOTE_PATH:-$DEFAULT_REMOTE_PATH}" "${file_array[@]}")
+            
+            while IFS=':' read -r file status; do
+                case "$status" in
+                    "missing")
+                        echo "  ∄ $file"
+                        ;;
+                    "differ")
+                        echo "  ≠ $file"
+                        ;;
+                    "same")
+                        echo "  = $file"
+                        ;;
+                esac
+            done <<< "$batch_output"
+        fi
     else
         echo "Files: <none>"
     fi
@@ -588,46 +665,58 @@ cmd_sync() {
     SYNCED_COUNT=0
     SKIPPED_COUNT=0
     
-    for file in "${VALID_FILES[@]}"; do
-        remote_path="$REMOTE_BASE_PATH/$file"
+    if [[ "$DRY_RUN" == true ]]; then
+        # Use batch comparison for dry run
+        batch_output=$(batch_files_differ "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "$REMOTE_BASE_PATH" "${VALID_FILES[@]}")
         
-        if [[ "$DRY_RUN" == true ]]; then
-            # Check if files differ for dry run
-            if files_differ "$file" "$remote_path" "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST"; then
-                echo "  [DRY RUN] $file → $remote_path (would sync)"
-            else
-                echo "  [DRY RUN] $file → $remote_path (unchanged, would skip)"
-            fi
-        else
-            echo "  Checking: $file"
+        while IFS=':' read -r file status; do
+            remote_path="$REMOTE_BASE_PATH/$file"
+            case "$status" in
+                "differ"|"missing")
+                    echo "  [DRY RUN] $file → $remote_path (would sync)"
+                    ;;
+                "same")
+                    echo "  [DRY RUN] $file → $remote_path (unchanged, would skip)"
+                    ;;
+            esac
+        done <<< "$batch_output"
+    else
+        # Use batch comparison for sync
+        echo "  Checking all files..."
+        batch_output=$(batch_files_differ "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "$REMOTE_BASE_PATH" "${VALID_FILES[@]}")
+        
+        while IFS=':' read -r file status; do
+            remote_path="$REMOTE_BASE_PATH/$file"
             
-            # Check if files differ
-            if files_differ "$file" "$remote_path" "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST"; then
-                echo "    Files differ, syncing..."
-                
-                # Create remote directory if needed
-                remote_dir=$(dirname "$remote_path")
-                ssh $SSH_OPTS -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST" \
-                    "mkdir -p '$remote_dir'" || {
-                    echo "    Failed to create remote directory: $remote_dir"
-                    continue
-                }
-                
-                # Copy the file
-                scp $SSH_OPTS -P "$SSH_PORT" -i "$SSH_KEY" \
-                    "$file" "root@$SSH_HOST:$remote_path" || {
-                    echo "    Failed to sync: $file"
-                    continue
-                }
-                
-                echo "    ✓ Synced"
-                ((SYNCED_COUNT++))
-            else
-                echo "    ✓ Unchanged, skipping"
-                ((SKIPPED_COUNT++))
-            fi
-        fi
-    done
+            case "$status" in
+                "differ"|"missing")
+                    echo "  Syncing: $file"
+                    
+                    # Create remote directory if needed
+                    remote_dir=$(dirname "$remote_path")
+                    ssh $SSH_OPTS -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST" \
+                        "mkdir -p '$remote_dir'" || {
+                        echo "    Failed to create remote directory: $remote_dir"
+                        continue
+                    }
+                    
+                    # Copy the file
+                    scp $SSH_OPTS -P "$SSH_PORT" -i "$SSH_KEY" \
+                        "$file" "root@$SSH_HOST:$remote_path" || {
+                        echo "    Failed to sync: $file"
+                        continue
+                    }
+                    
+                    echo "    ✓ Synced"
+                    ((SYNCED_COUNT++))
+                    ;;
+                "same")
+                    echo "  ✓ $file (unchanged)"
+                    ((SKIPPED_COUNT++))
+                    ;;
+            esac
+        done <<< "$batch_output"
+    fi
     
     if [[ "$DRY_RUN" == true ]]; then
         echo ""
