@@ -352,8 +352,31 @@ cmd_add() {
 }
 
 cmd_remove() {
-    if [[ -z "$1" ]]; then
-        echo "Usage: $0 remove <file-path> [file-path ...]"
+    local remove_missing=false
+    local files_to_remove=()
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --missing|-m)
+                remove_missing=true
+                shift
+                ;;
+            -*)
+                echo "Unknown option: $1"
+                echo "Usage: $0 remove [--missing|-m] <file-path> [file-path ...]"
+                exit 1
+                ;;
+            *)
+                files_to_remove+=("$1")
+                shift
+                ;;
+        esac
+    done
+    
+    # Check if we have any files to remove (either explicit or missing detection)
+    if [[ ${#files_to_remove[@]} -eq 0 && "$remove_missing" == false ]]; then
+        echo "Usage: $0 remove [--missing|-m] <file-path> [file-path ...]"
         exit 1
     fi
     
@@ -366,9 +389,32 @@ cmd_remove() {
     
     local files_removed=()
     local files_not_found=()
+    local missing_files=()
     
-    # Create a list of files to remove
-    local files_to_remove=("$@")
+    # If --missing flag is set, find all files that don't exist locally
+    if [[ "$remove_missing" == true ]]; then
+        IFS=':' read -ra file_array <<< "$SYNC_FILES"
+        for file in "${file_array[@]}"; do
+            if [[ ! -f "$file" ]]; then
+                missing_files+=("$file")
+            fi
+        done
+        
+        # Add missing files to removal list
+        files_to_remove+=("${missing_files[@]}")
+        
+        if [[ ${#missing_files[@]} -gt 0 ]]; then
+            echo "Found missing local files: ${missing_files[*]}"
+        else
+            echo "No missing local files found"
+        fi
+    fi
+    
+    # If no files to remove after processing, exit
+    if [[ ${#files_to_remove[@]} -eq 0 ]]; then
+        echo "No files to remove"
+        exit 0
+    fi
     
     # Start with current sync files
     NEW_FILES=""
@@ -536,7 +582,7 @@ Commands:
   forget-pod                Clear the current pod ID
   set-remote-path <path>    Set the remote base path (default: /workspace)
   add <file> [file ...]     Add files to the sync list
-  remove <file> [file ...]  Remove files from the sync list
+  remove [--missing|-m] <file> [file ...]  Remove files from the sync list
   list-files                List files in the sync list
   remove-all                Clear all files from the sync list
   get-ssh                   Print SSH command for current pod
@@ -559,6 +605,8 @@ Examples:
   $0 sync --dry-run
   $0 sync --remote-path /tmp/test
   $0 remove old_file.txt
+  $0 remove --missing              # Remove all files that don't exist locally
+  $0 remove -m file1.txt           # Remove file1.txt and any missing files
   $0 get-ssh
   $0 ssh
   $0 ssh "ls -la"
