@@ -669,8 +669,20 @@ cmd_sync() {
         # Use batch comparison for dry run
         batch_output=$(batch_files_differ "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "$REMOTE_BASE_PATH" "${VALID_FILES[@]}")
         
-        while IFS=':' read -r file status; do
+        # Process each line using a simple approach that avoids subshells
+        # Save the original IFS and set it to newline
+        OLDIFS=$IFS
+        IFS=$'\n'
+        
+        for line in $batch_output; do
+            if [[ -z "$line" ]]; then
+                continue
+            fi
+            
+            file=$(echo "$line" | cut -d':' -f1)
+            status=$(echo "$line" | cut -d':' -f2)
             remote_path="$REMOTE_BASE_PATH/$file"
+            
             case "$status" in
                 "differ"|"missing")
                     echo "  [DRY RUN] $file → $remote_path (would sync)"
@@ -679,14 +691,30 @@ cmd_sync() {
                     echo "  [DRY RUN] $file → $remote_path (unchanged, would skip)"
                     ;;
             esac
-        done <<< "$batch_output"
+        done
+        
+        # Restore original IFS
+        IFS=$OLDIFS
     else
         # Use batch comparison for sync
         echo "  Checking all files..."
         batch_output=$(batch_files_differ "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "$REMOTE_BASE_PATH" "${VALID_FILES[@]}")
         
-        while IFS=':' read -r file status; do
+        
+        # Process each line using a simple approach that avoids subshells
+        # Save the original IFS and set it to newline  
+        OLDIFS=$IFS
+        IFS=$'\n'
+        
+        for line in $batch_output; do
+            if [[ -z "$line" ]]; then
+                continue
+            fi
+            
+            file=$(echo "$line" | cut -d':' -f1)
+            status=$(echo "$line" | cut -d':' -f2)
             remote_path="$REMOTE_BASE_PATH/$file"
+            
             
             case "$status" in
                 "differ"|"missing")
@@ -715,7 +743,10 @@ cmd_sync() {
                     ((SKIPPED_COUNT++))
                     ;;
             esac
-        done <<< "$batch_output"
+        done
+        
+        # Restore original IFS
+        IFS=$OLDIFS
     fi
     
     if [[ "$DRY_RUN" == true ]]; then
