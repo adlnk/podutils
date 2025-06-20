@@ -592,6 +592,7 @@ Commands:
 Sync Options:
   --dry-run                 Show what would be synced without doing it
   --remote-path <path>      Override remote base path for this sync
+  --pod <pod-id>            Override target pod ID for this sync
 
 Examples:
   $0 set-pod k4kb5h7yt7n15n
@@ -604,6 +605,7 @@ Examples:
   $0 sync
   $0 sync --dry-run
   $0 sync --remote-path /tmp/test
+  $0 sync --pod k4kb5h7yt7n15n     # Sync to a different pod temporarily
   $0 remove old_file.txt
   $0 remove --missing              # Remove all files that don't exist locally
   $0 remove -m file1.txt           # Remove file1.txt and any missing files
@@ -618,6 +620,7 @@ EOF
 cmd_sync() {
     DRY_RUN=false
     OVERRIDE_REMOTE_PATH=""
+    OVERRIDE_POD_ID=""
     
     # Parse sync-specific options
     while [[ $# -gt 0 ]]; do
@@ -634,6 +637,14 @@ cmd_sync() {
                 OVERRIDE_REMOTE_PATH="$2"
                 shift 2
                 ;;
+            --pod)
+                if [[ -z "$2" ]]; then
+                    echo "Error: --pod requires a pod ID argument"
+                    exit 1
+                fi
+                OVERRIDE_POD_ID="$2"
+                shift 2
+                ;;
             *)
                 echo "Unknown sync option: $1"
                 exit 1
@@ -644,10 +655,11 @@ cmd_sync() {
     load_config
 
     # Validate environment
-    POD_ID="${SYNC_POD_ID:-$RUNPOD_POD_ID}"
+    # Use override pod ID if provided, otherwise fall back to config/env
+    POD_ID="${OVERRIDE_POD_ID:-${SYNC_POD_ID:-$RUNPOD_POD_ID}}"
     if [[ -z "$POD_ID" ]]; then
         echo "Error: No pod ID specified"
-        echo "Use: $0 set-pod <pod-id>"
+        echo "Use: $0 set-pod <pod-id> or $0 sync --pod <pod-id>"
         exit 1
     fi
     

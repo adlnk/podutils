@@ -1,2 +1,2 @@
 .podsync
-.claude/settings.local.json
+*.local.*
