@@ -30,22 +30,20 @@ get_local_hash() {
 
 get_remote_hash() {
     local remote_path="$1"
-    local ssh_opts="$2"
-    local ssh_port="$3"
-    local ssh_key="$4"
-    local ssh_host="$5"
+    local ssh_port="$2"
+    local ssh_key="$3"
+    local ssh_host="$4"
     
-    ssh $ssh_opts -p "$ssh_port" -i "$ssh_key" "$ssh_host" \
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$ssh_port" -i "$ssh_key" "$ssh_host" \
         "if [[ -f '$remote_path' ]]; then md5sum '$remote_path' 2>/dev/null | cut -d' ' -f1 || md5 -q '$remote_path' 2>/dev/null; fi" 2>/dev/null
 }
 
 get_all_remote_hashes() {
-    local ssh_opts="$1"
-    local ssh_port="$2"
-    local ssh_key="$3"
-    local ssh_host="$4"
-    local remote_base_path="$5"
-    shift 5
+    local ssh_port="$1"
+    local ssh_key="$2"
+    local ssh_host="$3"
+    local remote_base_path="$4"
+    shift 4
     local files=("$@")
     
     if [[ ${#files[@]} -eq 0 ]]; then
@@ -61,19 +59,18 @@ get_all_remote_hashes() {
     
     # Join commands with semicolons and execute in single SSH call
     local combined_command=$(IFS='; '; echo "${hash_commands[*]}")
-    ssh $ssh_opts -p "$ssh_port" -i "$ssh_key" "$ssh_host" "$combined_command" 2>/dev/null
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$ssh_port" -i "$ssh_key" "$ssh_host" "$combined_command" 2>/dev/null
 }
 
 files_differ() {
     local local_file="$1"
     local remote_path="$2"
-    local ssh_opts="$3"
-    local ssh_port="$4"
-    local ssh_key="$5"
-    local ssh_host="$6"
+    local ssh_port="$3"
+    local ssh_key="$4"
+    local ssh_host="$5"
     
     local local_hash=$(get_local_hash "$local_file")
-    local remote_hash=$(get_remote_hash "$remote_path" "$ssh_opts" "$ssh_port" "$ssh_key" "$ssh_host")
+    local remote_hash=$(get_remote_hash "$remote_path" "$ssh_port" "$ssh_key" "$ssh_host")
     
     # If we can't get either hash, assume they differ (sync to be safe)
     if [[ -z "$local_hash" || -z "$remote_hash" ]]; then
@@ -84,12 +81,11 @@ files_differ() {
 }
 
 batch_files_differ() {
-    local ssh_opts="$1"
-    local ssh_port="$2"
-    local ssh_key="$3"
-    local ssh_host="$4"
-    local remote_base_path="$5"
-    shift 5
+    local ssh_port="$1"
+    local ssh_key="$2"
+    local ssh_host="$3"
+    local remote_base_path="$4"
+    shift 4
     local files=("$@")
     
     if [[ ${#files[@]} -eq 0 ]]; then
@@ -97,7 +93,7 @@ batch_files_differ() {
     fi
     
     # Get all remote hashes in a single call
-    local remote_output=$(get_all_remote_hashes "$ssh_opts" "$ssh_port" "$ssh_key" "$ssh_host" "$remote_base_path" "${files[@]}")
+    local remote_output=$(get_all_remote_hashes "$ssh_port" "$ssh_key" "$ssh_host" "$remote_base_path" "${files[@]}")
     
     # Compare each file by parsing remote output
     for file in "${files[@]}"; do
@@ -211,7 +207,6 @@ cmd_status() {
                 if [[ -n "$SSH_CONNECTION" ]]; then
                     SSH_HOST=$(echo "$SSH_CONNECTION" | cut -d':' -f1)
                     SSH_PORT=$(echo "$SSH_CONNECTION" | cut -d':' -f2 | cut -d'-' -f1)
-                    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
                     CAN_CHECK_REMOTE=true
                 fi
             fi
@@ -230,7 +225,7 @@ cmd_status() {
             done
         else
             # Use batch comparison for efficiency
-            batch_output=$(batch_files_differ "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "${SYNC_REMOTE_PATH:-$DEFAULT_REMOTE_PATH}" "${file_array[@]}")
+            batch_output=$(batch_files_differ "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "${SYNC_REMOTE_PATH:-$DEFAULT_REMOTE_PATH}" "${file_array[@]}")
             
             while IFS=':' read -r file status; do
                 case "$status" in
@@ -516,9 +511,7 @@ cmd_get_ssh() {
     SSH_HOST=$(echo "$SSH_CONNECTION" | cut -d':' -f1)
     SSH_PORT=$(echo "$SSH_CONNECTION" | cut -d':' -f2 | cut -d'-' -f1)
     
-    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-    
-    echo "ssh $SSH_OPTS -p $SSH_PORT -i $SSH_KEY root@$SSH_HOST"
+    echo "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $SSH_PORT -i $SSH_KEY root@$SSH_HOST"
 }
 
 cmd_ssh() {
@@ -553,15 +546,13 @@ cmd_ssh() {
     SSH_HOST=$(echo "$SSH_CONNECTION" | cut -d':' -f1)
     SSH_PORT=$(echo "$SSH_CONNECTION" | cut -d':' -f2 | cut -d'-' -f1)
     
-    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-    
     # Execute SSH connection or command
     if [[ $# -eq 0 ]]; then
         # Interactive SSH session
-        exec ssh $SSH_OPTS -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST"
+        exec ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST"
     else
         # Execute remote command
-        ssh $SSH_OPTS -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST" "$@"
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST" "$@"
     fi
 }
 
@@ -720,14 +711,12 @@ cmd_sync() {
     # Sync files
     echo "Syncing ${#VALID_FILES[@]} files..."
     
-    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-    
     SYNCED_COUNT=0
     SKIPPED_COUNT=0
     
     if [[ "$DRY_RUN" == true ]]; then
         # Use batch comparison for dry run
-        batch_output=$(batch_files_differ "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "$REMOTE_BASE_PATH" "${VALID_FILES[@]}")
+        batch_output=$(batch_files_differ "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "$REMOTE_BASE_PATH" "${VALID_FILES[@]}")
         
         # Process each line using a simple approach that avoids subshells
         # Save the original IFS and set it to newline
@@ -758,7 +747,7 @@ cmd_sync() {
     else
         # Use batch comparison for sync
         echo "  Checking all files..."
-        batch_output=$(batch_files_differ "$SSH_OPTS" "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "$REMOTE_BASE_PATH" "${VALID_FILES[@]}")
+        batch_output=$(batch_files_differ "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "$REMOTE_BASE_PATH" "${VALID_FILES[@]}")
         
         
         # Process each line using a simple approach that avoids subshells
@@ -782,14 +771,14 @@ cmd_sync() {
                     
                     # Create remote directory if needed
                     remote_dir=$(dirname "$remote_path")
-                    ssh $SSH_OPTS -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST" \
+                    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST" \
                         "mkdir -p '$remote_dir'" || {
                         echo "    Failed to create remote directory: $remote_dir"
                         continue
                     }
                     
                     # Copy the file
-                    scp $SSH_OPTS -P "$SSH_PORT" -i "$SSH_KEY" \
+                    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -P "$SSH_PORT" -i "$SSH_KEY" \
                         "$file" "root@$SSH_HOST:$remote_path" || {
                         echo "    Failed to sync: $file"
                         continue
