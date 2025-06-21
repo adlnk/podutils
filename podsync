@@ -141,13 +141,41 @@ EOF
 # Subcommand functions
 #######################################
 cmd_status() {
+    OVERRIDE_POD_ID=""
+    
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --pod)
+                if [[ -z "$2" ]]; then
+                    echo "Error: --pod requires a pod ID argument"
+                    exit 1
+                fi
+                OVERRIDE_POD_ID="$2"
+                shift 2
+                ;;
+            -*)
+                echo "Unknown option: $1"
+                echo "Usage: $0 status [--pod <pod-id>]"
+                exit 1
+                ;;
+            *)
+                echo "Unknown argument: $1"
+                echo "Usage: $0 status [--pod <pod-id>]"
+                exit 1
+                ;;
+        esac
+    done
+    
     load_config
     
     # Check pod status if we have a pod ID
     POD_STATUS=""
     CONNECTION_STATUS=""
-    if [[ -n "${SYNC_POD_ID}" ]]; then
-        POD_DETAILS=$(runpodctl get pod "${SYNC_POD_ID}" --allfields 2>/dev/null) || true
+    # Use override pod ID if provided, otherwise fall back to config/env
+    ACTIVE_POD_ID="${OVERRIDE_POD_ID:-${SYNC_POD_ID}}"
+    if [[ -n "${ACTIVE_POD_ID}" ]]; then
+        POD_DETAILS=$(runpodctl get pod "${ACTIVE_POD_ID}" --allfields 2>/dev/null) || true
         if [[ -n "$POD_DETAILS" ]]; then
             # Check if we have actual data (more than just headers)
             DATA_ROWS=$(echo "$POD_DETAILS" | tail -n +2)
@@ -173,10 +201,14 @@ cmd_status() {
     fi
     
     # Display pod information
-    if [[ -z "${SYNC_POD_ID}" ]]; then
+    if [[ -z "${ACTIVE_POD_ID}" ]]; then
         echo "Pod ID: <not set>"
     else
-        echo "Pod ID: ${SYNC_POD_ID}"
+        if [[ -n "${OVERRIDE_POD_ID}" ]]; then
+            echo "Pod ID: ${ACTIVE_POD_ID} (override)"
+        else
+            echo "Pod ID: ${ACTIVE_POD_ID}"
+        fi
         if [[ -n "$POD_STATUS" ]]; then
             echo "Pod Status: $POD_STATUS"
             echo "Connection: $CONNECTION_STATUS"
@@ -190,7 +222,7 @@ cmd_status() {
         echo "Files:"
         
         # Check if we can get SSH connection details for sync status
-        POD_ID="${SYNC_POD_ID:-$RUNPOD_POD_ID}"
+        POD_ID="${ACTIVE_POD_ID:-$RUNPOD_POD_ID}"
         CAN_CHECK_REMOTE=false
         SSH_OPTS=""
         SSH_PORT=""
@@ -480,13 +512,40 @@ cmd_set_remote_path() {
 }
 
 cmd_get_ssh() {
+    OVERRIDE_POD_ID=""
+    
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --pod)
+                if [[ -z "$2" ]]; then
+                    echo "Error: --pod requires a pod ID argument"
+                    exit 1
+                fi
+                OVERRIDE_POD_ID="$2"
+                shift 2
+                ;;
+            -*)
+                echo "Unknown option: $1"
+                echo "Usage: $0 get-ssh [--pod <pod-id>]"
+                exit 1
+                ;;
+            *)
+                echo "Unknown argument: $1"
+                echo "Usage: $0 get-ssh [--pod <pod-id>]"
+                exit 1
+                ;;
+        esac
+    done
+    
     load_config
 
     # Validate environment
-    POD_ID="${SYNC_POD_ID:-$RUNPOD_POD_ID}"
+    # Use override pod ID if provided, otherwise fall back to config/env
+    POD_ID="${OVERRIDE_POD_ID:-${SYNC_POD_ID:-$RUNPOD_POD_ID}}"
     if [[ -z "$POD_ID" ]]; then
         echo "Error: No pod ID specified"
-        echo "Use: $0 set-pod <pod-id>"
+        echo "Use: $0 set-pod <pod-id> or $0 get-ssh --pod <pod-id>"
         exit 1
     fi
     
@@ -517,11 +576,37 @@ cmd_get_ssh() {
 cmd_ssh() {
     load_config
 
+    OVERRIDE_POD_ID=""
+    
+    # Parse options (must come before remote command)
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --pod)
+                if [[ -z "$2" ]]; then
+                    echo "Error: --pod requires a pod ID argument"
+                    exit 1
+                fi
+                OVERRIDE_POD_ID="$2"
+                shift 2
+                ;;
+            -*)
+                echo "Unknown option: $1"
+                echo "Usage: $0 ssh [--pod <pod-id>] [command]"
+                exit 1
+                ;;
+            *)
+                # This is a command argument, stop parsing options
+                break
+                ;;
+        esac
+    done
+
     # Validate environment
-    POD_ID="${SYNC_POD_ID:-$RUNPOD_POD_ID}"
+    # Use override pod ID if provided, otherwise fall back to config/env
+    POD_ID="${OVERRIDE_POD_ID:-${SYNC_POD_ID:-$RUNPOD_POD_ID}}"
     if [[ -z "$POD_ID" ]]; then
         echo "Error: No pod ID specified"
-        echo "Use: $0 set-pod <pod-id>"
+        echo "Use: $0 set-pod <pod-id> or $0 ssh --pod <pod-id>"
         exit 1
     fi
     
@@ -568,7 +653,7 @@ Usage:
 
 Commands:
   sync                      Sync files to pod (default)
-  status                    Show current pod ID and sync files
+  status [--pod <pod-id>]   Show current pod ID and sync files
   set-pod <id>              Set the target pod ID
   forget-pod                Clear the current pod ID
   set-remote-path <path>    Set the remote base path (default: /workspace)
@@ -576,8 +661,8 @@ Commands:
   remove [--missing|-m] <file> [file ...]  Remove files from the sync list
   list-files                List files in the sync list
   remove-all                Clear all files from the sync list
-  get-ssh                   Print SSH command for current pod
-  ssh [command]             Connect to pod via SSH or execute remote command
+  get-ssh [--pod <pod-id>]  Print SSH command for current pod
+  ssh [--pod <pod-id>] [command]  Connect to pod via SSH or execute remote command
   help                      Show this help
 
 Sync Options:
@@ -600,10 +685,14 @@ Examples:
   $0 remove old_file.txt
   $0 remove --missing              # Remove all files that don't exist locally
   $0 remove -m file1.txt           # Remove file1.txt and any missing files
+  $0 status --pod k4kb5h7yt7n15n        # Check status of a specific pod
   $0 get-ssh
+  $0 get-ssh --pod k4kb5h7yt7n15n      # Get SSH command for specific pod
   $0 ssh
   $0 ssh "ls -la"
   $0 ssh "cd /workspace && python train.py"
+  $0 ssh --pod k4kb5h7yt7n15n          # SSH to a specific pod
+  $0 ssh --pod k4kb5h7yt7n15n "ls -la" # Run command on specific pod
 
 EOF
 }
