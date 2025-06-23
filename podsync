@@ -131,6 +131,7 @@ save_config() {
     cat > "$CONFIG_FILE" << EOF
 # Pod sync configuration
 SYNC_POD_ID="$SYNC_POD_ID"
+SYNC_POD_LIST="$SYNC_POD_LIST"
 SYNC_FILES="$SYNC_FILES"
 SYNC_SSH_KEY="$SYNC_SSH_KEY"
 SYNC_REMOTE_PATH="$SYNC_REMOTE_PATH"
@@ -169,82 +170,145 @@ cmd_status() {
     
     load_config
     
-    # Check pod status if we have a pod ID
-    POD_STATUS=""
-    CONNECTION_STATUS=""
-    # Use override pod ID if provided, otherwise fall back to config/env
-    ACTIVE_POD_ID="${OVERRIDE_POD_ID:-${SYNC_POD_ID}}"
-    if [[ -n "${ACTIVE_POD_ID}" ]]; then
-        POD_DETAILS=$(runpodctl get pod "${ACTIVE_POD_ID}" --allfields 2>/dev/null) || true
-        if [[ -n "$POD_DETAILS" ]]; then
-            # Check if we have actual data (more than just headers)
-            DATA_ROWS=$(echo "$POD_DETAILS" | tail -n +2)
-            if [[ -n "$DATA_ROWS" ]]; then
-                # Extract status from the output (7th column)
-                POD_STATUS=$(echo "$DATA_ROWS" | awk '{print $7}')
-                
-                # Check if SSH connection is available
-                SSH_CONNECTION=$(echo "$POD_DETAILS" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
-                if [[ -n "$SSH_CONNECTION" ]]; then
-                    CONNECTION_STATUS="✓ SSH available"
+    # Determine which pods to show status for
+    STATUS_PODS=()
+    
+    SHOW_OVERRIDE_ONLY=false
+    if [[ -n "$OVERRIDE_POD_ID" ]]; then
+        SHOW_OVERRIDE_ONLY=true
+        STATUS_PODS=("$OVERRIDE_POD_ID")
+        echo "Pod ID: $OVERRIDE_POD_ID (override)"
+    elif [[ -n "$SYNC_POD_LIST" ]]; then
+        # Show status for all pods in the list
+        IFS=',' read -ra STATUS_PODS <<< "$SYNC_POD_LIST"
+        echo "Pod List: $SYNC_POD_LIST"
+        
+        # Also show single pod if set
+        if [[ -n "$SYNC_POD_ID" ]]; then
+            echo "Single Pod: $SYNC_POD_ID"
+        fi
+    elif [[ -n "$SYNC_POD_ID" ]]; then
+        # Show status for single configured pod
+        STATUS_PODS=("$SYNC_POD_ID")
+        echo "Pod ID: $SYNC_POD_ID"
+    else
+        echo "Pod ID: <not set>"
+    fi
+    
+    # Show status for each pod
+    if [[ ${#STATUS_PODS[@]} -gt 0 ]]; then
+        echo ""
+        
+        if [[ ${#STATUS_PODS[@]} -gt 1 && "$SHOW_OVERRIDE_ONLY" == false ]]; then
+            echo "=== Pod Status Details ==="
+        fi
+        
+        for pod_id in "${STATUS_PODS[@]}"; do
+            if [[ ${#STATUS_PODS[@]} -gt 1 && "$SHOW_OVERRIDE_ONLY" == false ]]; then
+                echo ""
+                echo "--- Pod: $pod_id ---"
+            fi
+            
+            # Get pod status
+            POD_STATUS=""
+            CONNECTION_STATUS=""
+            
+            POD_DETAILS=$(runpodctl get pod "$pod_id" --allfields 2>/dev/null) || true
+            if [[ -n "$POD_DETAILS" ]]; then
+                # Check if we have actual data (more than just headers)
+                DATA_ROWS=$(echo "$POD_DETAILS" | tail -n +2)
+                if [[ -n "$DATA_ROWS" ]]; then
+                    # Extract status from the output (7th column)
+                    POD_STATUS=$(echo "$DATA_ROWS" | awk '{print $7}')
+                    
+                    # Check if SSH connection is available
+                    SSH_CONNECTION=$(echo "$POD_DETAILS" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
+                    if [[ -n "$SSH_CONNECTION" ]]; then
+                        CONNECTION_STATUS="✓ SSH available"
+                    else
+                        CONNECTION_STATUS="✗ SSH not available"
+                    fi
                 else
-                    CONNECTION_STATUS="✗ SSH not available"
+                    POD_STATUS="NOT FOUND"
+                    CONNECTION_STATUS="✗ Pod not found"
                 fi
             else
                 POD_STATUS="NOT FOUND"
                 CONNECTION_STATUS="✗ Pod not found"
             fi
-        else
-            POD_STATUS="NOT FOUND"
-            CONNECTION_STATUS="✗ Pod not found"
-        fi
-    fi
-    
-    # Display pod information
-    if [[ -z "${ACTIVE_POD_ID}" ]]; then
-        echo "Pod ID: <not set>"
-    else
-        if [[ -n "${OVERRIDE_POD_ID}" ]]; then
-            echo "Pod ID: ${ACTIVE_POD_ID} (override)"
-        else
-            echo "Pod ID: ${ACTIVE_POD_ID}"
-        fi
-        if [[ -n "$POD_STATUS" ]]; then
-            echo "Pod Status: $POD_STATUS"
+            
+            echo "Status: $POD_STATUS"
             echo "Connection: $CONNECTION_STATUS"
+            
+            # For override, store SSH connection for file checking
+            if [[ "$SHOW_OVERRIDE_ONLY" == true ]]; then
+                OVERRIDE_SSH_CONNECTION="$SSH_CONNECTION"
+            fi
+        done
+        
+        if [[ ${#STATUS_PODS[@]} -gt 1 && "$SHOW_OVERRIDE_ONLY" == false ]]; then
+            echo ""
+            echo "========================="
         fi
     fi
     
     echo "SSH Key: ${SYNC_SSH_KEY:-$DEFAULT_SSH_KEY}"
     echo "Remote Path: ${SYNC_REMOTE_PATH:-$DEFAULT_REMOTE_PATH}"
     
+    echo ""
     if [[ -n "$SYNC_FILES" ]]; then
         echo "Files:"
         
-        # Check if we can get SSH connection details for sync status
-        POD_ID="${ACTIVE_POD_ID:-$RUNPOD_POD_ID}"
+        # For file status, determine which pod to check against
+        FILE_CHECK_POD=""
         CAN_CHECK_REMOTE=false
         SSH_OPTS=""
         SSH_PORT=""
         SSH_KEY=""
         SSH_HOST=""
         
-        if [[ -n "$POD_ID" ]]; then
-            SSH_KEY="${SYNC_SSH_KEY:-$DEFAULT_SSH_KEY}"
-            SSH_KEY=$(eval echo "$SSH_KEY")
+        if [[ "$SHOW_OVERRIDE_ONLY" == true ]]; then
+            # Use override pod
+            FILE_CHECK_POD="$OVERRIDE_POD_ID"
+            if [[ -n "$OVERRIDE_SSH_CONNECTION" ]]; then
+                SSH_HOST=$(echo "$OVERRIDE_SSH_CONNECTION" | cut -d':' -f1)
+                SSH_PORT=$(echo "$OVERRIDE_SSH_CONNECTION" | cut -d':' -f2 | cut -d'-' -f1)
+                CAN_CHECK_REMOTE=true
+            fi
+        else
+            # Use the first available pod from our status pods
+            if [[ ${#STATUS_PODS[@]} -gt 0 ]]; then
+                FILE_CHECK_POD="${STATUS_PODS[0]}"
+            elif [[ -n "$SYNC_POD_ID" ]]; then
+                FILE_CHECK_POD="$SYNC_POD_ID"
+            else
+                FILE_CHECK_POD="$RUNPOD_POD_ID"
+            fi
             
-            POD_DETAILS=$(runpodctl get pod "$POD_ID" --allfields 2>/dev/null) || true
-            if [[ -n "$POD_DETAILS" ]]; then
-                SSH_CONNECTION=$(echo "$POD_DETAILS" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
-                if [[ -n "$SSH_CONNECTION" ]]; then
-                    SSH_HOST=$(echo "$SSH_CONNECTION" | cut -d':' -f1)
-                    SSH_PORT=$(echo "$SSH_CONNECTION" | cut -d':' -f2 | cut -d'-' -f1)
-                    CAN_CHECK_REMOTE=true
+            if [[ -n "$FILE_CHECK_POD" ]]; then
+                POD_DETAILS=$(runpodctl get pod "$FILE_CHECK_POD" --allfields 2>/dev/null) || true
+                if [[ -n "$POD_DETAILS" ]]; then
+                    SSH_CONNECTION=$(echo "$POD_DETAILS" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
+                    if [[ -n "$SSH_CONNECTION" ]]; then
+                        SSH_HOST=$(echo "$SSH_CONNECTION" | cut -d':' -f1)
+                        SSH_PORT=$(echo "$SSH_CONNECTION" | cut -d':' -f2 | cut -d'-' -f1)
+                        CAN_CHECK_REMOTE=true
+                    fi
                 fi
             fi
         fi
         
+        if [[ -n "$FILE_CHECK_POD" ]]; then
+            SSH_KEY="${SYNC_SSH_KEY:-$DEFAULT_SSH_KEY}"
+            SSH_KEY=$(eval echo "$SSH_KEY")
+        fi
+        
         IFS=':' read -ra file_array <<< "$SYNC_FILES"
+        
+        # Show which pod we're checking files against if multiple pods are configured
+        if [[ ${#STATUS_PODS[@]} -gt 1 && -n "$FILE_CHECK_POD" && "$SHOW_OVERRIDE_ONLY" == false ]]; then
+            echo "(File status checked against pod: $FILE_CHECK_POD)"
+        fi
         
         if [[ "$CAN_CHECK_REMOTE" == false ]]; then
             # Can't check remote, show basic status
@@ -301,6 +365,111 @@ cmd_forget_pod() {
     SYNC_POD_ID=""
     save_config
     echo "Pod ID cleared"
+}
+
+cmd_set_pods() {
+    if [[ -z "$1" ]]; then
+        echo "Usage: $0 set-pods <pod1,pod2,pod3>"
+        exit 1
+    fi
+    
+    load_config
+    SYNC_POD_LIST="$1"
+    save_config
+    echo "Pod list set to: $SYNC_POD_LIST"
+}
+
+cmd_add_pod() {
+    if [[ -z "$1" ]]; then
+        echo "Usage: $0 add-pod <pod-id>"
+        exit 1
+    fi
+    
+    load_config
+    
+    local new_pod="$1"
+    
+    # Add to pod list if not already present
+    if [[ -z "$SYNC_POD_LIST" ]]; then
+        SYNC_POD_LIST="$new_pod"
+        save_config
+        echo "Added pod: $new_pod"
+    elif [[ ",$SYNC_POD_LIST," != *",$new_pod,"* ]]; then
+        SYNC_POD_LIST="$SYNC_POD_LIST,$new_pod"
+        save_config
+        echo "Added pod: $new_pod"
+    else
+        echo "Pod '$new_pod' already in pod list"
+        exit 0
+    fi
+}
+
+cmd_remove_pod() {
+    if [[ -z "$1" ]]; then
+        echo "Usage: $0 remove-pod <pod-id>"
+        exit 1
+    fi
+    
+    load_config
+    
+    if [[ -z "$SYNC_POD_LIST" ]]; then
+        echo "No pods in pod list"
+        exit 0
+    fi
+    
+    local remove_pod="$1"
+    local new_pod_list=""
+    
+    # Split pod list and rebuild without the target pod
+    IFS=',' read -ra pod_array <<< "$SYNC_POD_LIST"
+    local found=false
+    
+    for pod in "${pod_array[@]}"; do
+        if [[ "$pod" == "$remove_pod" ]]; then
+            found=true
+        else
+            if [[ -z "$new_pod_list" ]]; then
+                new_pod_list="$pod"
+            else
+                new_pod_list="$new_pod_list,$pod"
+            fi
+        fi
+    done
+    
+    if [[ "$found" == false ]]; then
+        echo "Pod '$remove_pod' not found in pod list"
+        exit 1
+    fi
+    
+    SYNC_POD_LIST="$new_pod_list"
+    save_config
+    echo "Removed pod: $remove_pod"
+}
+
+cmd_list_pods() {
+    load_config
+    if [[ -z "$SYNC_POD_LIST" ]]; then
+        echo "No pods in pod list"
+        exit 0
+    fi
+    
+    IFS=',' read -ra pod_array <<< "$SYNC_POD_LIST"
+    for pod in "${pod_array[@]}"; do
+        echo "$pod"
+    done
+}
+
+cmd_clear_pods() {
+    load_config
+    if [[ -z "$SYNC_POD_LIST" ]]; then
+        echo "Pod list is already empty"
+        exit 0
+    fi
+    
+    echo "Clearing pod list"
+    SYNC_POD_LIST=""
+    save_config
+    echo "Pod list cleared"
 }
 
 cmd_list_files() {
@@ -654,13 +823,24 @@ Usage:
 Commands:
   sync                      Sync files to pod (default)
   status [--pod <pod-id>]   Show current pod ID and sync files
+  
+Pod Management:
   set-pod <id>              Set the target pod ID
   forget-pod                Clear the current pod ID
-  set-remote-path <path>    Set the remote base path (default: /workspace)
+  set-pods <pod1,pod2>      Set the default pod list for multi-sync
+  add-pod <pod-id>          Add pod to the pod list
+  remove-pod <pod-id>       Remove pod from the pod list
+  list-pods                 List pods in the pod list
+  clear-pods                Clear all pods from the pod list
+  
+File Management:
   add <file> [file ...]     Add files to the sync list
   remove [--missing|-m] <file> [file ...]  Remove files from the sync list
   list-files                List files in the sync list
   remove-all                Clear all files from the sync list
+  
+Remote Access:
+  set-remote-path <path>    Set the remote base path (default: /workspace)
   get-ssh [--pod <pod-id>]  Print SSH command for current pod
   ssh [--pod <pod-id>] [command]  Connect to pod via SSH or execute remote command
   help                      Show this help
@@ -669,38 +849,173 @@ Sync Options:
   --dry-run                 Show what would be synced without doing it
   --remote-path <path>      Override remote base path for this sync
   --pod <pod-id>            Override target pod ID for this sync
+  --pods <pod1,pod2,pod3>   Sync to multiple pods simultaneously
 
 Examples:
-  $0 set-pod k4kb5h7yt7n15n
-  $0 forget-pod
-  $0 set-remote-path /workspace/my-project
+  # Pod management
+  $0 set-pod k4kb5h7yt7n15n            # Set single active pod
+  $0 set-pods dev,staging,prod         # Set multi-pod list for deployment
+  $0 add-pod testing                   # Add another pod to the list
+  $0 list-pods                         # Show current pod list
+  $0 remove-pod staging                # Remove a pod from the list
+  $0 forget-pod                        # Clear single pod
+  $0 clear-pods                        # Clear pod list
+  
+  # File management
   $0 add bin/run_experiments.sh config.json
   $0 list-files
-  $0 remove-all
-  $0 status
-  $0 sync
-  $0 sync --dry-run
-  $0 sync --remote-path /tmp/test
-  $0 sync --pod k4kb5h7yt7n15n     # Sync to a different pod temporarily
   $0 remove old_file.txt
-  $0 remove --missing              # Remove all files that don't exist locally
-  $0 remove -m file1.txt           # Remove file1.txt and any missing files
-  $0 status --pod k4kb5h7yt7n15n        # Check status of a specific pod
+  $0 remove --missing                  # Remove all files that don't exist locally
+  $0 remove-all                        # Clear file list
+  
+  # Syncing
+  $0 status                            # Show current configuration
+  $0 sync                              # Sync using configured pods
+  $0 sync --dry-run                    # Dry run with configured pods
+  $0 sync --pod k4kb5h7yt7n15n         # Override to sync to single pod
+  $0 sync --pods pod1,pod2,pod3        # Override to sync to specific pods
+  $0 sync --remote-path /tmp/test      # Override remote path
+  
+  # Remote access
   $0 get-ssh
   $0 get-ssh --pod k4kb5h7yt7n15n      # Get SSH command for specific pod
   $0 ssh
   $0 ssh "ls -la"
-  $0 ssh "cd /workspace && python train.py"
-  $0 ssh --pod k4kb5h7yt7n15n          # SSH to a specific pod
   $0 ssh --pod k4kb5h7yt7n15n "ls -la" # Run command on specific pod
 
 EOF
+}
+
+#######################################
+# Single pod sync helper function
+#######################################
+sync_to_single_pod() {
+    local pod_id="$1"
+    local ssh_key="$2"
+    local remote_base_path="$3"
+    local dry_run="$4"
+    shift 4
+    local files=("$@")
+    
+    # Get SSH connection details
+    local pod_details
+    pod_details=$(runpodctl get pod "$pod_id" --allfields 2>/dev/null) || {
+        echo "Error: Failed to get pod details for $pod_id" >&2
+        return 1
+    }
+    
+    # Extract SSH host and port
+    local ssh_connection
+    ssh_connection=$(echo "$pod_details" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
+    if [[ -z "$ssh_connection" ]]; then
+        echo "Error: Could not extract SSH connection details for $pod_id" >&2
+        return 1
+    fi
+    
+    local ssh_host ssh_port
+    ssh_host=$(echo "$ssh_connection" | cut -d':' -f1)
+    ssh_port=$(echo "$ssh_connection" | cut -d':' -f2 | cut -d'-' -f1)
+    
+    echo "SSH connection: root@$ssh_host:$ssh_port" >&2
+    echo "Remote base path: $remote_base_path" >&2
+    echo "Syncing ${#files[@]} files..." >&2
+    
+    local synced_count=0
+    local skipped_count=0
+    
+    if [[ "$dry_run" == true ]]; then
+        # Use batch comparison for dry run
+        local batch_output
+        batch_output=$(batch_files_differ "$ssh_port" "$ssh_key" "root@$ssh_host" "$remote_base_path" "${files[@]}")
+        
+        local OLDIFS=$IFS
+        IFS=$'\n'
+        
+        for line in $batch_output; do
+            if [[ -z "$line" ]]; then
+                continue
+            fi
+            
+            local file status remote_path
+            file=$(echo "$line" | cut -d':' -f1)
+            status=$(echo "$line" | cut -d':' -f2)
+            remote_path="$remote_base_path/$file"
+            
+            case "$status" in
+                "differ"|"missing")
+                    echo "  [DRY RUN] $file → $remote_path (would sync)" >&2
+                    ((synced_count++))
+                    ;;
+                "same")
+                    echo "  [DRY RUN] $file → $remote_path (unchanged, would skip)" >&2
+                    ((skipped_count++))
+                    ;;
+            esac
+        done
+        
+        IFS=$OLDIFS
+    else
+        # Use batch comparison for sync
+        echo "  Checking all files..." >&2
+        local batch_output
+        batch_output=$(batch_files_differ "$ssh_port" "$ssh_key" "root@$ssh_host" "$remote_base_path" "${files[@]}")
+        
+        local OLDIFS=$IFS
+        IFS=$'\n'
+        
+        for line in $batch_output; do
+            if [[ -z "$line" ]]; then
+                continue
+            fi
+            
+            local file status remote_path
+            file=$(echo "$line" | cut -d':' -f1)
+            status=$(echo "$line" | cut -d':' -f2)
+            remote_path="$remote_base_path/$file"
+            
+            case "$status" in
+                "differ"|"missing")
+                    echo "  Syncing: $file" >&2
+                    
+                    # Create remote directory if needed
+                    local remote_dir
+                    remote_dir=$(dirname "$remote_path")
+                    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$ssh_port" -i "$ssh_key" "root@$ssh_host" \
+                        "mkdir -p '$remote_dir'" || {
+                        echo "    Failed to create remote directory: $remote_dir" >&2
+                        continue
+                    }
+                    
+                    # Copy the file
+                    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -P "$ssh_port" -i "$ssh_key" \
+                        "$file" "root@$ssh_host:$remote_path" || {
+                        echo "    Failed to sync: $file" >&2
+                        continue
+                    }
+                    
+                    echo "    ✓ Synced" >&2
+                    ((synced_count++))
+                    ;;
+                "same")
+                    echo "  ✓ $file (unchanged)" >&2
+                    ((skipped_count++))
+                    ;;
+            esac
+        done
+        
+        IFS=$OLDIFS
+    fi
+    
+    # Return counts in format "synced:skipped"
+    echo "$synced_count:$skipped_count"
+    return 0
 }
 
 cmd_sync() {
     DRY_RUN=false
     OVERRIDE_REMOTE_PATH=""
     OVERRIDE_POD_ID=""
+    OVERRIDE_POD_IDS=()
     
     # Parse sync-specific options
     while [[ $# -gt 0 ]]; do
@@ -725,6 +1040,15 @@ cmd_sync() {
                 OVERRIDE_POD_ID="$2"
                 shift 2
                 ;;
+            --pods)
+                if [[ -z "$2" ]]; then
+                    echo "Error: --pods requires a comma-separated list of pod IDs"
+                    exit 1
+                fi
+                # Split comma-separated pod IDs into array
+                IFS=',' read -ra OVERRIDE_POD_IDS <<< "$2"
+                shift 2
+                ;;
             *)
                 echo "Unknown sync option: $1"
                 exit 1
@@ -734,13 +1058,35 @@ cmd_sync() {
     
     load_config
 
-    # Validate environment
-    # Use override pod ID if provided, otherwise fall back to config/env
-    POD_ID="${OVERRIDE_POD_ID:-${SYNC_POD_ID:-$RUNPOD_POD_ID}}"
-    if [[ -z "$POD_ID" ]]; then
-        echo "Error: No pod ID specified"
-        echo "Use: $0 set-pod <pod-id> or $0 sync --pod <pod-id>"
+    # Validate environment and determine target pods
+    TARGET_PODS=()
+    
+    # Check for conflicting options
+    if [[ -n "$OVERRIDE_POD_ID" && ${#OVERRIDE_POD_IDS[@]} -gt 0 ]]; then
+        echo "Error: Cannot use both --pod and --pods flags"
+        echo "Use either --pod <pod-id> or --pods <pod1,pod2,pod3>"
         exit 1
+    fi
+    
+    # Determine which pods to sync to
+    if [[ ${#OVERRIDE_POD_IDS[@]} -gt 0 ]]; then
+        # Multi-pod sync via --pods flag
+        TARGET_PODS=("${OVERRIDE_POD_IDS[@]}")
+    elif [[ -n "$OVERRIDE_POD_ID" ]]; then
+        # Single pod override via --pod flag
+        TARGET_PODS=("$OVERRIDE_POD_ID")
+    elif [[ -n "$SYNC_POD_LIST" ]]; then
+        # Use configured pod list
+        IFS=',' read -ra TARGET_PODS <<< "$SYNC_POD_LIST"
+    else
+        # Use configured/env single pod ID
+        POD_ID="${SYNC_POD_ID:-$RUNPOD_POD_ID}"
+        if [[ -z "$POD_ID" ]]; then
+            echo "Error: No pod ID specified"
+            echo "Use: $0 set-pod <pod-id>, $0 set-pods <pod1,pod2>, $0 sync --pod <pod-id>, or $0 sync --pods <pod1,pod2>"
+            exit 1
+        fi
+        TARGET_PODS=("$POD_ID")
     fi
     
     if [[ -z "$SYNC_FILES" ]]; then
@@ -755,30 +1101,7 @@ cmd_sync() {
     # Determine remote base path (override > config > default)
     REMOTE_BASE_PATH="${OVERRIDE_REMOTE_PATH:-${SYNC_REMOTE_PATH:-$DEFAULT_REMOTE_PATH}}"
 
-    # Get SSH connection details
-    echo "Getting SSH details for pod: $POD_ID"
-    
-    POD_DETAILS=$(runpodctl get pod "$POD_ID" --allfields 2>/dev/null) || {
-        echo "Error: Failed to get pod details"
-        echo "Make sure pod ID '$POD_ID' exists and runpodctl is configured"
-        exit 1
-    }
-    
-    # Extract SSH host and port
-    SSH_CONNECTION=$(echo "$POD_DETAILS" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
-    if [[ -z "$SSH_CONNECTION" ]]; then
-        echo "Error: Could not extract SSH connection details"
-        echo "Pod might not be running or SSH might not be available"
-        exit 1
-    fi
-    
-    SSH_HOST=$(echo "$SSH_CONNECTION" | cut -d':' -f1)
-    SSH_PORT=$(echo "$SSH_CONNECTION" | cut -d':' -f2 | cut -d'-' -f1)
-    
-    echo "SSH connection: root@$SSH_HOST:$SSH_PORT"
-    echo "Remote base path: $REMOTE_BASE_PATH"
-
-    # Validate local files
+    # Validate local files first
     echo "Validating local files..."
     
     VALID_FILES=()
@@ -797,95 +1120,98 @@ cmd_sync() {
         exit 1
     fi
 
-    # Sync files
-    echo "Syncing ${#VALID_FILES[@]} files..."
-    
-    SYNCED_COUNT=0
-    SKIPPED_COUNT=0
-    
-    if [[ "$DRY_RUN" == true ]]; then
-        # Use batch comparison for dry run
-        batch_output=$(batch_files_differ "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "$REMOTE_BASE_PATH" "${VALID_FILES[@]}")
+    # Multi-pod sync logic
+    if [[ ${#TARGET_PODS[@]} -gt 1 ]]; then
+        echo ""
+        echo "Syncing to ${#TARGET_PODS[@]} pods: ${TARGET_PODS[*]}"
         
-        # Process each line using a simple approach that avoids subshells
-        # Save the original IFS and set it to newline
-        OLDIFS=$IFS
-        IFS=$'\n'
+        # Validate all pods first
+        echo "Validating all pods..."
+        INVALID_PODS=()
         
-        for line in $batch_output; do
-            if [[ -z "$line" ]]; then
+        for pod_id in "${TARGET_PODS[@]}"; do
+            POD_DETAILS=$(runpodctl get pod "$pod_id" --allfields 2>/dev/null) || {
+                echo "  ✗ $pod_id (failed to get details)"
+                INVALID_PODS+=("$pod_id")
                 continue
+            }
+            
+            SSH_CONNECTION=$(echo "$POD_DETAILS" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+->22' | head -1)
+            if [[ -z "$SSH_CONNECTION" ]]; then
+                echo "  ✗ $pod_id (SSH not available)"
+                INVALID_PODS+=("$pod_id")
+            else
+                echo "  ✓ $pod_id (available)"
             fi
-            
-            file=$(echo "$line" | cut -d':' -f1)
-            status=$(echo "$line" | cut -d':' -f2)
-            remote_path="$REMOTE_BASE_PATH/$file"
-            
-            case "$status" in
-                "differ"|"missing")
-                    echo "  [DRY RUN] $file → $remote_path (would sync)"
-                    ;;
-                "same")
-                    echo "  [DRY RUN] $file → $remote_path (unchanged, would skip)"
-                    ;;
-            esac
         done
         
-        # Restore original IFS
-        IFS=$OLDIFS
-    else
-        # Use batch comparison for sync
-        echo "  Checking all files..."
-        batch_output=$(batch_files_differ "$SSH_PORT" "$SSH_KEY" "root@$SSH_HOST" "$REMOTE_BASE_PATH" "${VALID_FILES[@]}")
+        if [[ ${#INVALID_PODS[@]} -gt 0 ]]; then
+            echo "Error: Some pods unavailable: ${INVALID_PODS[*]}"
+            echo "Aborting multi-pod sync."
+            exit 1
+        fi
         
+        # Sync to each pod
+        TOTAL_SYNCED=0
+        TOTAL_SKIPPED=0
+        POD_RESULTS=()
         
-        # Process each line using a simple approach that avoids subshells
-        # Save the original IFS and set it to newline  
-        OLDIFS=$IFS
-        IFS=$'\n'
-        
-        for line in $batch_output; do
-            if [[ -z "$line" ]]; then
-                continue
+        for pod_id in "${TARGET_PODS[@]}"; do
+            echo ""
+            echo "=== Syncing to pod: $pod_id ==="
+            
+            # Call single pod sync function
+            sync_result=$(sync_to_single_pod "$pod_id" "$SSH_KEY" "$REMOTE_BASE_PATH" "$DRY_RUN" "${VALID_FILES[@]}")
+            sync_exit_code=$?
+            
+            if [[ $sync_exit_code -eq 0 ]]; then
+                # Parse result: "synced_count:skipped_count"
+                synced_count=$(echo "$sync_result" | cut -d':' -f1)
+                skipped_count=$(echo "$sync_result" | cut -d':' -f2)
+                
+                TOTAL_SYNCED=$((TOTAL_SYNCED + synced_count))
+                TOTAL_SKIPPED=$((TOTAL_SKIPPED + skipped_count))
+                POD_RESULTS+=("$pod_id: $synced_count synced, $skipped_count unchanged")
+            else
+                POD_RESULTS+=("$pod_id: FAILED")
             fi
-            
-            file=$(echo "$line" | cut -d':' -f1)
-            status=$(echo "$line" | cut -d':' -f2)
-            remote_path="$REMOTE_BASE_PATH/$file"
-            
-            
-            case "$status" in
-                "differ"|"missing")
-                    echo "  Syncing: $file"
-                    
-                    # Create remote directory if needed
-                    remote_dir=$(dirname "$remote_path")
-                    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$SSH_PORT" -i "$SSH_KEY" "root@$SSH_HOST" \
-                        "mkdir -p '$remote_dir'" || {
-                        echo "    Failed to create remote directory: $remote_dir"
-                        continue
-                    }
-                    
-                    # Copy the file
-                    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -P "$SSH_PORT" -i "$SSH_KEY" \
-                        "$file" "root@$SSH_HOST:$remote_path" || {
-                        echo "    Failed to sync: $file"
-                        continue
-                    }
-                    
-                    echo "    ✓ Synced"
-                    ((SYNCED_COUNT++))
-                    ;;
-                "same")
-                    echo "  ✓ $file (unchanged)"
-                    ((SKIPPED_COUNT++))
-                    ;;
-            esac
         done
         
-        # Restore original IFS
-        IFS=$OLDIFS
+        # Print summary
+        echo ""
+        echo "=== Multi-Pod Sync Summary ==="
+        for result in "${POD_RESULTS[@]}"; do
+            echo "$result"
+        done
+        
+        if [[ "$DRY_RUN" == true ]]; then
+            echo ""
+            echo "Multi-pod dry run complete. Use without --dry-run to actually sync files."
+        else
+            echo ""
+            echo "Multi-pod sync complete! ($TOTAL_SYNCED total synced, $TOTAL_SKIPPED total unchanged across ${#TARGET_PODS[@]} pods)"
+        fi
+        
+        return 0
     fi
+
+    # Single pod sync (use helper function)
+    POD_ID="${TARGET_PODS[0]}"
+    echo ""
+    echo "Syncing to single pod: $POD_ID"
+    
+    # Call single pod sync function
+    sync_result=$(sync_to_single_pod "$POD_ID" "$SSH_KEY" "$REMOTE_BASE_PATH" "$DRY_RUN" "${VALID_FILES[@]}")
+    sync_exit_code=$?
+    
+    if [[ $sync_exit_code -ne 0 ]]; then
+        echo "Error: Failed to sync to pod $POD_ID"
+        exit 1
+    fi
+    
+    # Parse result: "synced_count:skipped_count"
+    SYNCED_COUNT=$(echo "$sync_result" | cut -d':' -f1)
+    SKIPPED_COUNT=$(echo "$sync_result" | cut -d':' -f2)
     
     if [[ "$DRY_RUN" == true ]]; then
         echo ""
@@ -920,13 +1246,28 @@ case "$COMMAND" in
         cmd_sync "$@"
         ;;
     status)
-        cmd_status
+        cmd_status "$@"
         ;;
     set-pod)
         cmd_set_pod "$@"
         ;;
     forget-pod)
         cmd_forget_pod
+        ;;
+    set-pods)
+        cmd_set_pods "$@"
+        ;;
+    add-pod)
+        cmd_add_pod "$@"
+        ;;
+    remove-pod)
+        cmd_remove_pod "$@"
+        ;;
+    list-pods)
+        cmd_list_pods
+        ;;
+    clear-pods)
+        cmd_clear_pods
         ;;
     set-remote-path)
         cmd_set_remote_path "$@"
@@ -944,7 +1285,7 @@ case "$COMMAND" in
         cmd_remove_all
         ;;
     get-ssh)
-        cmd_get_ssh
+        cmd_get_ssh "$@"
         ;;
     ssh)
         cmd_ssh "$@"
